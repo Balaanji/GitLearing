@@ -1,0 +1,472 @@
+--****************************************************************************************************************************
+-- * Author: Bala Anjaneyulu G
+-- * Creation Date: 09 Sept 2020
+-- * Description : Template Script for Subject Rename
+ -----------------------------------------------------------------------------------------------------------------------------------
+--*****************************************************************************************************************************
+
+If exists (select 1 from sysobjects where [name] like 'cspSubjectRename')
+	drop proc cspSubjectRename
+go
+
+Create proc dbo.cspSubjectRename
+		@ProjectName NVARCHAR(4000), 
+		@EnvironmentName NVARCHAR(4000) ,
+		@SiteName NVARCHAR(4000), 
+		@SubjectName NVARCHAR(100), 
+		@NewSubjectName NVARCHAR(100), 
+		@Form_OId NVARCHAR(4000) ,
+		@FieldOID_SUBJID NVARCHAR(4000) ,
+		@FieldOID_SUBJNUM NVARCHAR(4000),
+		@MaxNumber nvarchar(100) = NULL,
+		@WR_Number Nvarchar(100)
+As
+Begin
+
+----Set Variables
+--DECLARE @SubjectName NVARCHAR(100) = '6701001', 
+--		@NewSubjectName NVARCHAR(100) = '6701003', 
+--		@MaxNumber nvarchar(100) = NULL,
+--		@SiteName NVARCHAR(4000) = 'CRU', 
+--		@ProjectName NVARCHAR(4000) = 'COMB157G2399', 
+--		@EnvironmentName NVARCHAR(4000) = 'Prod',
+--		@Form_OId NVARCHAR(4000) = 'PRIMARY002',
+--		@FieldOID_SUBJID NVARCHAR(4000) = 'SUBJID',
+--		@FieldOID_SUBJNUM NVARCHAR(4000) = 'SUBJNUM',
+--		@WR_Number Nvarchar(100)				= '12345'
+
+
+DECLARE	@Ascid_Changed INT,
+		@ASCID_Entered INT,
+		@Date DATETIME 
+
+		SET @Date = GETUTCDATE()
+		DECLARE @Dt varchar(30);
+		Set @DT = Replace(Convert(VarchaR(25),@Date,126),'T',' ')
+
+		Declare @WR Nvarchar(100) 
+
+		set @WR = '(WR#'+@WR_Number+')'
+
+		Declare @DatapageTypeId int, 
+				@RecordTypeId int, 
+				@DatapointTypeId int,
+				@InstanceTypeID INT,
+				@StudyTypeID INT,
+				@StudySiteTypeID INT,
+				@SubjectTypeID INT,
+				@Milisecond int,
+				@EndTime datetime,
+				@ExecutionTime nVarchar(15)
+
+	Select @DatapageTypeId = ObjectTypeId from ObjectTypeR where ObjectName = 'Medidata.Core.Objects.DataPage'
+	Select @RecordTypeId = ObjectTypeId from ObjectTypeR where ObjectName = 'Medidata.Core.Objects.Record'
+	Select @DatapointTypeId = ObjectTypeId from ObjectTypeR where ObjectName = 'Medidata.Core.Objects.DataPoint'
+	Select @InstanceTypeID = ObjectTypeID from objecttyper where ObjectName = 'Medidata.Core.Objects.Instance'
+	Select @StudyTypeID = ObjectTypeID from objecttyper where ObjectName = 'Medidata.Core.Objects.Study'
+	Select @StudySiteTypeID = ObjectTypeID from objecttyper where ObjectName = 'Medidata.Core.Objects.StudySite'
+	Select @SubjectTypeID = ObjectTypeID from objecttyper where ObjectName = 'Medidata.Core.Objects.Subject'
+
+SELECT @Ascid_Changed = ID FROM AuditSubCategoryR WHERE Name = 'SubjectNameChanged'		
+SELECT @ASCID_Entered = ID FROM AuditSubCategoryR WHERE name = 'Entered'
+ 
+	Declare @TableName_Subjects Varchar(100)
+	Declare @TableName_Datapoints Varchar(100)
+	Declare @TableName_StandardizedCustomizations Varchar(200)
+
+	Declare @sql nVarchar(max) = ''
+	set @TableName_Subjects = 'BK_WR_'+@WR+'_Subjects'
+	set @TableName_Datapoints = 'BK_WR_'+@WR+'_Datapoints'
+	set @TableName_StandardizedCustomizations = 'BK_WR_'+@WR+'_StandardizedCustomizations'
+
+--Temp table to hold subject information
+IF EXISTS (SELECT * FROM tempdb.dbo.sysobjects where id =OBJECT_ID(N'tempdb.dbo.#TempSubjects') AND type = 'u')
+	DROP TABLE #TempSubjects
+
+CREATE TABLE #TempSubjects(ProjectName nvarchar(4000), SiteName nvarchar(4000), EnvironmentName nvarchar(4000), SubjectID int, SubjectName nvarchar(100), CRFVersionID int,StudyId int,StudySiteId int,SiteId int)
+
+INSERT INTO #TempSubjects(ProjectName, SiteName, EnvironmentName, SubjectID, SubjectName, CRFVersionID,StudyId,StudySiteId,SiteId)
+SELECT dbo.fnlocaldefault(PRJ.ProjectName), dbo.fnLocalDefault(SI.SiteNameID), dbo.fnlds(ST.EnvironmentNameID, 'eng'), Sub.SubjectID, Sub.SubjectName, Sub.CRFVersionID,ss.StudyID,SS.studysiteid,SS.SiteID
+FROM Subjects Sub
+INNER JOIN StudySites SS ON SS.studysiteid = SUB.studysiteid
+INNER JOIN Sites SI ON SI.SiteID = SS.SiteID
+INNER JOIN Studies ST ON ST.StudyID = SS.StudyID
+INNER JOIN Projects PRJ ON PRJ.ProjectID = ST.ProjectID
+WHERE dbo.fnlocaldefault(PRJ.ProjectName) = @ProjectName
+	AND SUB.IsUnavailable = 0
+	AND SUB.Deleted = 0
+	AND SUB.SubjectActive = 1
+	AND Sub.SubjectName = @SubjectName
+	AND dbo.fnlds(ST.EnvironmentNameID, 'eng') = @EnvironmentName
+	AND dbo.fnLds(SiteNameID, 'eng') = @SiteName
+	
+
+	--Temp table to hold subject form datapoints
+IF EXISTS (SELECT * FROM tempdb.dbo.sysobjects where id=object_id(N'tempdb.dbo.#TempDatapoints') AND type = 'u')
+	DROP TABLE #TempDatapoints
+
+CREATE TABLE #TempDatapoints (SubjectID int, Datapointid int, Data nvarchar(4000), FieldOid nvarchar(50), ReqVerf Bit, Isverified Bit)
+			
+INSERT INTO #TempDatapoints(SubjectID,Datapointid,Data,FieldOid)
+SELECT T.SubjectID,Datapointid,Data,F.Oid
+FROM #TempSubjects T 
+INNER JOIN Datapages dpg on T.SubjectId = dpg.SubjectID 
+INNER JOIN forms frm on dpg.FormID = frm.FormID
+INNER JOIN Datapoints D on D.DataPageId = dpg.DataPageId
+INNER JOIN Fields f on f.fieldid = D.fieldid
+WHERE frm.OID = @Form_OId 
+	AND f.oid IN (@FieldOID_SUBJID,@FieldOID_SUBJNUM)
+
+--Backup tables
+	IF NOT EXISTS (SELECT NULL FROM sysobjects WHERE name = @TableName_Subjects	AND TYPE = 'U')
+
+	set @sql  =	'CREATE TABLE DBO.'+@TableName_Subjects+ '(
+			SubjectID INT
+			,SubjectName NVARCHAR(100)
+			,Updated DATETIME
+			,BK_Timestamp Varchar(100)
+			)'
+
+	EXECUTE sp_executesql @sql
+
+	IF NOT EXISTS (
+			SELECT NULL
+			FROM sysobjects
+			WHERE name = @TableName_Datapoints
+				AND TYPE = 'U'
+			)
+
+	set @sql  =	'CREATE TABLE DBO.'+@TableName_Datapoints+ '(
+			DataPointID INT
+			,Data NVARCHAR(4000)
+			,ChangeCount INT
+			,ReqVerf Bit
+			,Isverified Bit
+			,Updated DATETIME
+			,IsTouched BIT
+			,LastEnteredDate DATETIME
+			,BK_Timestamp DATETIME
+			)'
+
+	EXECUTE sp_executesql @sql
+
+		IF NOT EXISTS (
+			SELECT NULL
+			FROM sysobjects
+			WHERE name = @TableName_StandardizedCustomizations
+				AND TYPE = 'U'
+			)
+
+	set @sql  =	'CREATE TABLE DBO.'+@TableName_StandardizedCustomizations+ '(
+		[CustomizationID] [int] ,
+		[CustomizationName] [nvarchar](100) NOT NULL,
+		[C1] [nvarchar](50) NULL,
+		[C2] [nvarchar](50) NULL,
+		[C3] [nvarchar](50) NULL,
+		[C4] [nvarchar](50) NULL,
+		[C5] [nvarchar](50) NULL,
+		[C6] [nvarchar](50) NULL,
+		[C7] [nvarchar](50) NULL,
+		[C8] [nvarchar](50) NULL,
+		[C9] [nvarchar](50) NULL,
+		[C10] [nvarchar](50) NULL,
+		[C11] [nvarchar](50) NULL,
+		[C12] [nvarchar](50) NULL,
+		[C13] [nvarchar](50) NULL,
+		[C14] [nvarchar](50) NULL,
+		[C15] [nvarchar](50) NULL,
+		BK_Timestamp datetime
+	)'
+
+	EXECUTE sp_executesql @sql
+
+	
+BEGIN TRY
+BEGIN TRAN
+
+	 	 Set @sql = 'INSERT INTO '+@TableName_Subjects+' (
+					SubjectID
+					,SubjectName
+					,Updated
+					,BK_Timestamp
+					)
+					SELECT Sub.SubjectID, Sub.SubjectName, Sub.Updated, '''+@DT+'''
+					FROM Subjects Sub
+					INNER JOIN #TempSubjects T on T.SubjectID = Sub.SubjectID'
+
+		EXECUTE sp_executesql @sql
+
+	 		Set @sql = 	'INSERT INTO '+@TableName_Datapoints+' (
+					DataPointID, Data, ChangeCount, ReqVerf, Isverified, Updated, IsTouched, LastEnteredDate, BK_Timestamp)
+					SELECT DP.DataPointID, DP.Data, DP.ChangeCount, dp.ReqVerification, dp.Isverified, DP.Updated, DP.IsTouched, DP.LastEnteredDate, '''+@DT+'''
+					FROM DataPoints DP
+					INNER JOIN #TempDatapoints T on DP.DataPointId = T.DataPointID'
+		
+		EXECUTE sp_executesql @sql
+
+	 UPDATE Sub 
+	 Set Sub.SubjectName = @NewSubjectName, Sub.Updated = @DT
+	 OUTPUT 
+	 '', '', 'Subject name has changed to ''' + @NewSubjectName + ''' '+@WR, -2, @DT, inserted.SubjectID, @SubjectTypeID, @Ascid_Changed
+	 into Audits (Property, Value, Readable, AuditUserID, AuditTime, ObjectID, ObjectTypeid, AuditSubCategoryID)		
+	 FROM Subjects Sub
+	 INNER JOIN #TempSubjects T on T.SubjectID = Sub.SubjectID
+
+	 Update DP 
+	 Set DP.Data=@NewSubjectName, DP.Updated=@DT, DP.ChangeCount=ChangeCount+1, DP.ReqVerification=F.SourceDocument, IsVerified=0, DP.IsTouched=1, LastEnteredDate=@DT
+	 OUTPUT 
+	 '','', 'User entered '''+ @NewSubjectName + ''' '+@WR, -2, @DT, Inserted.DataPointID, @DatapointTypeID, @ASCID_Entered
+	 into Audits (Property, Value, Readable, AuditUserID, AuditTime, ObjectID, ObjectTypeid, AuditSubCategoryID)					  
+	 FROM DataPoints DP
+	 INNER JOIN #TempDatapoints T on DP.DataPointId = T.DataPointID
+	 INNER JOIN Fields F on DP.FieldID = F.FieldID
+	 where T.FieldOid = @FieldOID_SUBJID
+
+	 Update DP 
+	 Set DP.Data=RIGHT(@NewSubjectName,3), DP.Updated=@DT, DP.ChangeCount=ChangeCount+1, DP.ReqVerification=F.SourceDocument, IsVerified=0, DP.IsTouched=1, LastEnteredDate=@DT
+	 OUTPUT
+	 '','', 'User entered '''+ RIGHT(@NewSubjectName,3) + ''' '+@WR, -2, @DT, Inserted.DataPointID, @DatapointTypeID, @ASCID_Entered
+	 into Audits (Property, Value, Readable, AuditUserID, AuditTime, ObjectID, ObjectTypeid,auditsubcategoryid)					  
+	 FROM DataPoints DP
+	 INNER JOIN #TempDatapoints T on DP.DataPointId = T.DataPointID
+	 INNER JOIN Fields F on DP.FieldID = F.FieldID
+	 where T.FieldOid = @FieldOID_SUBJNUM
+
+--getting total subjects count in the studysite
+	SELECT @MaxNumber = COUNT(Sub.SubjectID) 
+	FROM Subjects Sub
+	INNER JOIN StudySites SS ON SS.studysiteid = Sub.studysiteid
+	INNER JOIN Sites SI ON SI.SiteID = SS.SiteID
+	INNER JOIN Studies ST ON ST.StudyID = SS.StudyID
+	INNER JOIN Projects PRJ ON PRJ.ProjectID = ST.ProjectID
+	WHERE dbo.fnlocaldefault(PRJ.ProjectName) = @ProjectName
+		AND SUB.IsUnavailable = 0
+		AND SUB.Deleted = 0
+		AND SUB.SubjectActive = 1
+		AND dbo.fnlds(ST.EnvironmentNameID, 'eng') = @EnvironmentName
+		AND dbo.fnLds(SiteNameID, 'eng') = @SiteName
+
+--creating temp table to update Custom table
+	IF EXISTS (SELECT *	FROM tempdb.dbo.sysobjects	WHERE id = object_id(N'tempdb.dbo.#TempCFTable') AND type = 'u')
+		DROP TABLE #TempCFTable
+
+	CREATE TABLE #TempCFTable (c1 nvarchar(100), c2 nvarchar(100), c3 nvarchar(100), c4 DATETIME)
+	
+	INSERT INTO #TempCFTable (c1, c2, c3, c4)
+	SELECT StudyID, SiteId, @MaxNumber, @DT 
+	FROM #TempSubjects t 
+	WHERE @MaxNumber IS NOT NULL
+
+		--Backup of custom table
+		Set @sql =	'INSERT INTO '+ @TableName_StandardizedCustomizations +'(CustomizationID,CustomizationName,C1,C2,C3,C4,C5,C6,C7,C8,C9,C10,C11,C12,C13,C14,C15,BK_Timestamp)
+		SELECT CustomizationID,CustomizationName,s.C1,s.C2,s.C3,s.C4,C5,C6,C7,C8,C9,C10,C11,C12,C13,C14,C15,getutcdate()
+		FROM StandardizedCustomizations s
+		INNER JOIN #TempCFTable t ON s.c1=t.c1 and s.c2=t.c2'
+
+		EXECUTE sp_executesql @sql
+
+		--Updating custom table to auto increment newly created subjects
+	UPDATE s 
+	set s.c3 = t.c3, c4 = @Dt
+	FROM #TempCFTable t
+	INNER JOIN StandardizedCustomizations s ON s.c1=t.c1 and s.c2=t.c2
+
+
+COMMIT TRAN
+END TRY
+BEGIN CATCH
+	ROLLBACK TRAN
+	print '   ERNumber: ' + CAST(ERROR_NUMBER() as varchar)
+	print '   Error_Severity: ' + CAST(ERROR_SEVERITY() as varchar)
+	print '   Error_State : ' + CAST(ERROR_STATE() as varchar)
+	print '   Error_Procedure: ' + CAST(ERROR_PROCEDURE() as varchar(500))
+	print '   Error_Line : ' + CAST(ERROR_LINE() as varchar)
+	print '   Error_Message:' + CAST(ERROR_MESSAGE()as varchar(500))
+	print '	  Transaction rollbacked'
+END CATCH
+
+	-------------------------------------------------------------------------
+	print 'Update Statuses'
+	-------------------------------------------------------------------------
+	IF EXISTS ( SELECT 1  
+            FROM configuration  
+            WHERE tag = 'DATABASEVERSION'  
+                 and convert(decimal(6,3),replace(left(ConfigValue,5),'.','') + '.' + substring(ConfigValue,7,len(ConfigValue)-6)) >= 565.506)  
+	 Begin  
+
+
+
+
+	Print 'Recalculating the status of objects...'
+	Print ''
+	-- RECALCULATE STATUSES FOR subjects
+	--======================================
+	DECLARE @SubjectIDTVP DeferredRollupTaskEnqueueTableType  
+
+	INSERT @SubjectIDTVP (ObjectId, StudyID, StudySiteID)  
+	SELECT DISTINCT   
+			s.SubjectID   
+			,ss.StudyID  
+			,s.StudySiteID  
+	FROM #TempSubjects t 
+	join dbo.Subjects s on t.SubjectID = s.SubjectID  
+	join dbo.StudySites ss on s.StudySiteID = ss.StudySiteID  
+
+	EXEC dbo.spDeferredRollupTaskEnqueueBulk  
+			 @ObjectTypeID        = 5  
+			 ,@ObjectIDs          = @SubjectIDTVP  
+			 ,@RoleID             = -1 -- all roles  
+			 ,@OperationTypeID    = 1 -- status recalculation  
+			 ,@TaskSource         = 'cspSoftDeleteDataPages'  
+			 ,@RequiresCVRefresh  = 1;     
+
+	Print 'Recalculation complete.'
+	Print ''
+
+	END
+
+	Else 
+	Begin 
+		Print 'Recalculating the status of objects...'
+	Print ''
+	-- RECALCULATE STATUSES FOR subjects
+	--======================================
+	SET NOCOUNT ON
+
+	Create table #tmp (
+		StudyID int,
+		StudySiteID int,
+		SubjectID int,
+		InstanceID int,
+		DataPageID int,
+		RecordID int,
+		DataPointID int)
+
+	Insert into #tmp (StudyID, StudySiteID, SubjectID, InstanceID, DataPageID, RecordID, DataPointID)
+	Select st.StudyID, ss.StudySiteID, s.SubjectID, i.InstanceID, dpg.DataPageID, r.RecordID, dp.DataPointID
+	from dbo.Projects p
+	inner join dbo.Studies st on st.ProjectID = p.ProjectID
+	inner join dbo.StudySites ss on ss.StudyID = st.StudyID
+	inner join dbo.Sites si on si.SiteID = ss.SiteID
+	inner join dbo.Subjects s on s.StudySiteID = ss.StudySiteID
+	inner join dbo.DataPages dpg on dpg.SubjectID = s.SubjectID
+	left join dbo.Instances i on i.subjectID = s.subjectID 
+	inner join dbo.Records r on r.DataPageID = dpg.DataPageID
+	left join dbo.DataPoints dp on dp.RecordID = r.RecordID
+	join #TempSubjects t on t.SubjectID = s.SubjectID
+
+	Create table #Instances (InstanceID int)
+
+	Insert into #Instances(InstanceID)
+	select distinct i.InstanceID
+	from #tmp t
+	inner join dbo.Instances i on i.SubjectID = t.SubjectID
+
+	update objectstatusallroles
+	set ExpirationDate = '1900-01-01 00:00:00.000'
+	from #tmp t
+	inner join objectstatusallroles os on os.ObjectId = t.DataPointID and os.ObjectTypeId = @DatapointTypeID
+
+	update objectstatusallroles
+	set ExpirationDate = '1900-01-01 00:00:00.000'
+	from #tmp t
+	inner join objectstatusallroles os on os.ObjectId = t.RecordID and os.ObjectTypeId = @RecordTypeID
+
+	update objectstatusallroles
+	set ExpirationDate = '1900-01-01 00:00:00.000'
+	from #tmp t
+	inner join objectstatusallroles os on os.ObjectId = t.DataPageID and os.ObjectTypeId = @DatapageTypeID
+
+	update objectstatusallroles
+	set ExpirationDate = '1900-01-01 00:00:00.000'
+	from #Instances t
+	inner join objectstatusallroles os on os.ObjectId = t.InstanceID and os.ObjectTypeId = @InstanceTypeID
+
+	update objectstatusallroles
+	set ExpirationDate = '1900-01-01 00:00:00.000'
+	from #tmp t
+	inner join objectstatusallroles os on os.ObjectId = t.SubjectID and os.ObjectTypeId = @SubjectTypeID
+
+	update objectstatusallroles
+	set ExpirationDate = '1900-01-01 00:00:00.000'
+	from #tmp t
+	inner join objectstatusallroles os on os.ObjectId = t.StudySiteID and os.ObjectTypeId = @StudySiteTypeID
+
+	update objectstatusallroles
+	set ExpirationDate = '1900-01-01 00:00:00.000'
+	from #tmp t
+	inner join objectstatusallroles os on os.ObjectId = t.StudyID and os.ObjectTypeId = @StudyTypeID
+
+	update dbo.Records
+	set NeedsCVRefresh = 1
+	from #tmp t
+	inner join dbo.Records r on r.RecordID = t.RecordID
+
+	--------------------------------------------------------------------------- 
+	-- force status recalculations
+	---------------------------------------------------------------------------
+
+	select distinct StudySiteID, -2 as RoleID, getUTCDate() as Dirty, studyID
+	into #StatusRollupQueue
+	from #tmp
+
+	update t 
+	set t.RoleID = ro.roleID
+	from #StatusRollupQueue t
+		join userStudyRole usr
+			on usr.studyID = t.studyID
+		join roles ro
+			on ro.roleID = usr.roleID 
+				and ro.active = 1
+				and ro.roleID > 0
+
+
+	INSERT INTO StatusRollupQueue (ObjectTypeID, ObjectID, RoleID, Dirty)
+	SELECT distinct @StudySiteTypeID, StudySiteID, RoleID, getUTCDate()
+	FROM #StatusRollupQueue
+
+	-- Clean up
+	drop table #tmp
+	drop table #Instances
+	drop table #StatusRollupQueue
+
+	SET NOCOUNT OFF
+	Print 'Recalculation complete.'
+	Print ''
+ End
+
+ 	-------------------------------------------------------------------------
+	--Display output
+	-------------------------------------------------------------------------
+
+SELECT T.ProjectName, T.EnvironmentName, T.SiteName, Sub.SubjectID, T.SubjectName as OldSubjectName, Sub.SubjectName as NewSubjectName, F.oid as FieldOID, TD.Data as OldData, Dp.Data as NewData
+FROM Subjects Sub
+INNER JOIN #TempSubjects T on T.SubjectID = Sub.SubjectID
+INNER JOIN #TempDatapoints TD on TD.SubjectID = T.SubjectID
+INNER JOIN DataPoints Dp on Dp.DataPointID = TD.Datapointid
+INNER JOIN Fields F on DP.FieldID = F.FieldID
+
+--Clean up
+DROP TABLE #TempSubjects
+DROP TABLE #TempDatapoints
+If OBJECT_ID('tempdb..#TempCFTable')is not null
+DROP TABLE #TempCFTable
+
+Set @EndTime = GetUTCDate()
+Set @Milisecond = datediff(ms, @Dt, @EndTime)
+
+Set @ExecutionTime = cast(@Milisecond / 1000 / 60 / 60 as varchar) + ':' + 
+	right('0' + cast(@Milisecond / 1000 / 60 % 60 as varchar),2) + ':' + 
+	right('0' + cast(@Milisecond / 1000 % 60 as varchar),2) + '.' + 
+	right('00' + cast(@Milisecond % 1000 as varchar),3)
+
+Print ''
+Print 'End Time      : ' + CONVERT(VARCHAR, @EndTime, 113) + ' UTC'
+Print 'ExecutionTime Time: ' + CONVERT(VARCHAR, @ExecutionTime, 113)
+Print ''
+Print 'Execution complete!'
+
+
+
+End
+go
